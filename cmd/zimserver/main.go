@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -29,71 +30,52 @@ const (
 )
 
 func main() {
-	tempSet := flag.NewFlagSet("", flag.ContinueOnError)
-	tempSet.Usage = func() {}
-	showHelp := tempSet.Bool("h", false, "Show this help message")
-	tempSet.Bool("help", false, "Show this help message")
-	showVersion := tempSet.Bool("v", false, "Show version")
-	tempSet.Bool("version", false, "Show version")
+	flags := flag.NewFlagSet("zimserver", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
 
-	if err := tempSet.Parse(os.Args[1:]); err != nil {
-		printUsage()
-		os.Exit(1)
+	var host, port string
+	var showHelp, showVersion bool
+	flags.StringVar(&host, "host", "localhost", "HTTP server host")
+	flags.StringVar(&host, "H", "localhost", "HTTP server host (short)")
+	flags.StringVar(&port, "port", "8080", "HTTP server port")
+	flags.StringVar(&port, "p", "8080", "HTTP server port (short)")
+	flags.BoolVar(&showHelp, "help", false, "Show this help message")
+	flags.BoolVar(&showHelp, "h", false, "Show this help message (short)")
+	flags.BoolVar(&showVersion, "version", false, "Show version")
+	flags.BoolVar(&showVersion, "v", false, "Show version (short)")
+
+	// The flag package stops at the first positional argument, so keep
+	// parsing past each path to allow options anywhere on the command line.
+	paths := make([]string, 0)
+	args := os.Args[1:]
+	for {
+		if err := flags.Parse(args); err != nil {
+			logError("%v", err)
+			printUsage()
+			os.Exit(1)
+		}
+		if flags.NArg() == 0 {
+			break
+		}
+		paths = append(paths, flags.Arg(0))
+		args = flags.Args()[1:]
 	}
 
-	if *showHelp || (tempSet.Lookup("help") != nil && tempSet.Lookup("help").Value.String() == "true") {
+	if showHelp {
 		printUsage()
 		os.Exit(0)
 	}
-	if *showVersion || (tempSet.Lookup("version") != nil && tempSet.Lookup("version").Value.String() == "true") {
+	if showVersion {
 		fmt.Printf("ZIMServer %s\n", version)
 		os.Exit(0)
 	}
 
-	if len(os.Args) < 2 {
+	if len(paths) == 0 {
 		logError("No ZIM files or directories specified. Use -h for help.")
 		os.Exit(1)
 	}
-	runServeCommand(os.Args[1:])
-}
 
-func runServeCommand(args []string) {
-	serveCmd := flag.NewFlagSet("serve", flag.ContinueOnError)
-	serveCmd.Usage = func() {}
-
-	host := serveCmd.String("host", "localhost", "HTTP server host")
-	serveCmd.String("H", "localhost", "HTTP server host (short)")
-
-	port := serveCmd.String("port", "8080", "HTTP server port")
-	serveCmd.String("p", "8080", "HTTP server port (short)")
-
-	serveCmd.Bool("h", false, "Show this help message")
-	serveCmd.Bool("help", false, "Show this help message")
-	serveCmd.Bool("v", false, "Show version")
-	serveCmd.Bool("version", false, "Show version")
-
-	if err := serveCmd.Parse(args); err != nil {
-		printUsage()
-		os.Exit(1)
-	}
-
-	if serveCmd.Lookup("H").Value.String() != "localhost" {
-		*host = serveCmd.Lookup("H").Value.String()
-	}
-	if serveCmd.Lookup("p").Value.String() != "8080" {
-		*port = serveCmd.Lookup("p").Value.String()
-	}
-
-	paths := serveCmd.Args()
-	allPaths := make([]string, 0)
-	allPaths = append(allPaths, paths...)
-
-	if len(allPaths) == 0 {
-		logError("No ZIM files or directories specified")
-		os.Exit(1)
-	}
-
-	runServer(*host, *port, allPaths)
+	runServer(host, port, paths)
 }
 
 func printUsage() {
