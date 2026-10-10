@@ -800,6 +800,16 @@ select {
     height: 100%;
     border: none;
     display: block;
+    background-color: #ffffff;
+}
+
+html[data-content-dark] #contentFrame {
+    background-color: transparent;
+}
+
+html[data-content-pending] #contentFrame,
+#contentFrame.content-pending {
+    visibility: hidden;
 }
 
 .spinner {

@@ -3,6 +3,10 @@ let archiveName;
 let lastSearchResults = '';
 let connectionLostToast = null;
 let originalFaviconHref;
+let preparedIframeDoc = null;
+let contentHiddenAt = 0;
+
+const DARK_STYLE_ID = 'zimserver-dark-mode-style';
 
 function getOrCreateFaviconLink() {
     let link = document.querySelector('link[rel~="icon"]');
@@ -111,15 +115,28 @@ function init(archive) {
             iframeWin.addEventListener('hashchange', updateBrowserURL);
             iframeWin.addEventListener('popstate', updateBrowserURL);
 
+            // Hide the frame while the next document is being swapped in so
+            // the old page's teardown and the new page's first paint can't
+            // flash white under a dark theme.
+            iframeWin.addEventListener('pagehide', function() {
+                if (expectsDarkContent()) {
+                    hideContent();
+                }
+            });
+
             fixIframeURLs(iframeDoc);
             applyDarkModeToIframe(iframeDoc);
+            revealContent();
 
             updateBrowserURL();
         } catch(e) {
             console.log('Cannot access iframe or content is not fully loaded:', e);
+            revealContent();
             updateBrowserURL();
         }
     });
+
+    watchIframeDocuments();
 
     document.addEventListener('click', function(e) {
         const searchResults = document.getElementById('searchResults');
@@ -510,70 +527,173 @@ function applyTheme() {
     }
 }
 
-function applyDarkModeToIframe(iframeDoc) {
-    const forceDarkMode = localStorage.getItem('zimserver_force_dark_mode') === 'true';
+function isDarkTheme() {
     const theme = localStorage.getItem('zimserver_theme') || 'auto';
-    const isDark = theme === 'dark' || (theme === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    return theme === 'dark' || (theme === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
 
+function isForcedDarkActive() {
+    return isDarkTheme() && localStorage.getItem('zimserver_force_dark_mode') === 'true';
+}
+
+// Whether this archive's pages were last seen rendering themselves dark
+// ('dark'), light ('light'), or have not been seen yet (null).
+function getContentScheme() {
+    try {
+        return localStorage.getItem('zimserver_content_scheme:' + archiveName);
+    } catch (e) {
+        return null;
+    }
+}
+
+function rememberContentScheme(scheme) {
+    try {
+        localStorage.setItem('zimserver_content_scheme:' + archiveName, scheme);
+    } catch (e) {}
+}
+
+// True when the next article will be inverted by the forced dark mode.
+function willInvertContent() {
+    return isForcedDarkActive() && getContentScheme() !== 'dark';
+}
+
+// True when the next article is expected to end up dark, so any white in
+// between should be covered up.
+function expectsDarkContent() {
+    return isDarkTheme() && (willInvertContent() || getContentScheme() === 'dark');
+}
+
+function isArchiveContentDoc(iframeDoc) {
+    try {
+        return iframeDoc.location.pathname.startsWith('/content/' + archiveName + '/');
+    } catch (e) {
+        return false;
+    }
+}
+
+function ensureDarkStyle(iframeDoc) {
+    let style = iframeDoc.getElementById(DARK_STYLE_ID);
+    if (!style) {
+        style = iframeDoc.createElement('style');
+        style.id = DARK_STYLE_ID;
+        style.textContent = `
+            html {
+                filter: invert(1) hue-rotate(180deg) !important;
+                background-color: #ffffff !important;
+            }
+            img, video, iframe, canvas, svg {
+                filter: invert(1) hue-rotate(180deg) !important;
+            }
+        `;
+    }
+    // (Re)append so the rule stays after anything the page itself adds.
+    (iframeDoc.head || iframeDoc.documentElement).appendChild(style);
+    return style;
+}
+
+function removeDarkStyle(iframeDoc) {
+    const style = iframeDoc.getElementById(DARK_STYLE_ID);
+    if (style) style.remove();
+}
+
+function hideContent() {
     const iframe = document.getElementById('contentFrame');
-    const styleId = 'zimserver-dark-mode-style';
-    let style = iframeDoc.getElementById(styleId);
+    if (iframe) iframe.classList.add('content-pending');
+    contentHiddenAt = Date.now();
+}
 
-    if (forceDarkMode && isDark) {
-        let hasDarkMode = false;
-        
-        if (iframeDoc.querySelector('meta[name="color-scheme"][content*="dark"]')) {
-            hasDarkMode = true;
-        }
-        
-        if (!hasDarkMode && iframeDoc.documentElement.style.colorScheme === 'dark') {
-            hasDarkMode = true;
-        }
+function revealContent() {
+    const iframe = document.getElementById('contentFrame');
+    if (iframe) iframe.classList.remove('content-pending');
+    document.documentElement.removeAttribute('data-content-pending');
+    contentHiddenAt = 0;
+}
 
-        if (!hasDarkMode && iframeDoc.body) {
-            const bodyStyle = getComputedStyle(iframeDoc.body);
-            const bodyBg = bodyStyle.backgroundColor;
-            
-            const rgbMatch = bodyBg.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
-            if (rgbMatch) {
-                const r = parseInt(rgbMatch[1]);
-                const g = parseInt(rgbMatch[2]);
-                const b = parseInt(rgbMatch[3]);
-                const a = rgbMatch[4] !== undefined ? parseFloat(rgbMatch[4]) : 1;
-                
-                if (a < 0.5) {
-                    hasDarkMode = false;
-                } else {
-                    const brightness = (r * 299 + g * 587 + b * 114) / 1000;
-                    if (brightness < 128) {
-                        hasDarkMode = true;
-                    }
+// Checks every frame for a freshly committed iframe document and injects the
+// dark style before its first paint, instead of waiting for the load event
+// (which only fires once the whole page, images included, has finished).
+function watchIframeDocuments() {
+    const iframe = document.getElementById('contentFrame');
+
+    function prepareDocument(doc) {
+        if (!isArchiveContentDoc(doc)) {
+            // Internal pages (catch, 404) already follow the site theme.
+            if (isDarkTheme()) iframe.style.backgroundColor = 'transparent';
+            return;
+        }
+        if (willInvertContent()) {
+            ensureDarkStyle(doc);
+            iframe.style.backgroundColor = '#000000';
+        } else if (isDarkTheme() && getContentScheme() === 'dark') {
+            iframe.style.backgroundColor = 'transparent';
+        }
+    }
+
+    function tick() {
+        try {
+            const doc = iframe.contentDocument;
+            if (doc && doc !== preparedIframeDoc) {
+                if (doc.documentElement) {
+                    preparedIframeDoc = doc;
+                    prepareDocument(doc);
+                    revealContent();
+                }
+            } else if (contentHiddenAt && Date.now() - contentHiddenAt > 2000) {
+                revealContent();
+            }
+        } catch (e) {
+            revealContent();
+        }
+        requestAnimationFrame(tick);
+    }
+
+    tick();
+}
+
+function detectNativeDarkMode(iframeDoc) {
+    if (iframeDoc.querySelector('meta[name="color-scheme"][content*="dark"]')) {
+        return true;
+    }
+
+    if (iframeDoc.documentElement.style.colorScheme === 'dark') {
+        return true;
+    }
+
+    if (iframeDoc.body) {
+        const bodyBg = getComputedStyle(iframeDoc.body).backgroundColor;
+        const rgbMatch = bodyBg.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+        if (rgbMatch) {
+            const r = parseInt(rgbMatch[1]);
+            const g = parseInt(rgbMatch[2]);
+            const b = parseInt(rgbMatch[3]);
+            const a = rgbMatch[4] !== undefined ? parseFloat(rgbMatch[4]) : 1;
+
+            if (a >= 0.5) {
+                const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+                if (brightness < 128) {
+                    return true;
                 }
             }
         }
+    }
 
-        if (!hasDarkMode) {
-            if (!style) {
-                style = iframeDoc.createElement('style');
-                style.id = styleId;
-                style.textContent = `
-                    html {
-                        filter: invert(1) hue-rotate(180deg) !important;
-                        background-color: #ffffff !important;
-                    }
-                    img, video, iframe, canvas, svg {
-                        filter: invert(1) hue-rotate(180deg) !important;
-                    }
-                `;
-                iframeDoc.head.appendChild(style);
-            }
-            if (iframe) iframe.style.backgroundColor = '#000000';
-        } else {
-            if (style) style.remove();
-            if (iframe) iframe.style.backgroundColor = 'transparent';
-        }
+    return false;
+}
+
+function applyDarkModeToIframe(iframeDoc) {
+    const iframe = document.getElementById('contentFrame');
+    const isDark = isDarkTheme();
+    const hasDarkMode = detectNativeDarkMode(iframeDoc);
+
+    if (isArchiveContentDoc(iframeDoc)) {
+        rememberContentScheme(hasDarkMode ? 'dark' : 'light');
+    }
+
+    if (isForcedDarkActive() && !hasDarkMode) {
+        ensureDarkStyle(iframeDoc);
+        if (iframe) iframe.style.backgroundColor = '#000000';
     } else {
-        if (style) style.remove();
-        if (iframe) iframe.style.backgroundColor = '#ffffff';
+        removeDarkStyle(iframeDoc);
+        if (iframe) iframe.style.backgroundColor = (isDark && hasDarkMode) ? 'transparent' : '#ffffff';
     }
 }

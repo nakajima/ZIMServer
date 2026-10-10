@@ -1,5 +1,25 @@
 {{define "title"}}{{.ArchiveTitle}}{{end}}
 
+{{define "head"}}
+<script>
+    (function() {
+        try {
+            const theme = localStorage.getItem('zimserver_theme') || 'auto';
+            const isDark = theme === 'dark' || (theme === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+            if (!isDark) return;
+            const forced = localStorage.getItem('zimserver_force_dark_mode') === 'true';
+            const scheme = localStorage.getItem('zimserver_content_scheme:' + '{{.ArchiveName}}');
+            if (scheme !== 'light') {
+                document.documentElement.setAttribute('data-content-dark', '');
+            }
+            if (scheme === 'dark' || (forced && scheme !== 'dark')) {
+                document.documentElement.setAttribute('data-content-pending', '');
+            }
+        } catch (e) {}
+    })();
+</script>
+{{end}}
+
 {{define "body"}}
 <div class="viewer-page">
     <header>
@@ -48,9 +68,9 @@
 
     <div class="iframe-container">
         {{if .IsCatch}}
-        <iframe id="contentFrame" src="{{.CatchSrc}}" style="background-color: #ffffff;"></iframe>
+        <iframe id="contentFrame" src="{{.CatchSrc}}"></iframe>
         {{else}}
-        <iframe id="contentFrame" src="/content/{{.ArchiveName}}/{{.EntryPath}}" style="background-color: #ffffff;"></iframe>
+        <iframe id="contentFrame" src="/content/{{.ArchiveName}}/{{.EntryPath}}"></iframe>
         {{end}}
     </div>
 
